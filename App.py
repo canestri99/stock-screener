@@ -1,7 +1,8 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
+import json
 
 # Configurazione Pagina
 st.set_page_config(page_title="Small Cap Screener", layout="wide")
@@ -21,77 +22,92 @@ w_growth = st.sidebar.slider("Peso Valutazione/Target (%)", 0, 100, 40) / 100
 w_momentum = st.sidebar.slider("Peso Momentum Tecnico (%)", 0, 100, 40) / 100
 w_health = st.sidebar.slider("Peso Salute Finanziaria (%)", 0, 100, 20) / 100
 
-# --- FUNZIONE DI CALCOLO E ANALISI ---
-def analyze_stock(ticker_symbol):
-    try:
-        stock = yf.Ticker(ticker_symbol)
-        
-        # Scarica lo storico dati (ultimi 6 mesi)
-        hist = stock.history(period="6m")
-        if hist.empty or len(hist) < 20:
-            return None
-
-        # Ottieni prezzo attuale dal grafico
-        price = float(hist['Close'].iloc[-1])
-        
-        # Tenta il recupero informazioni fondamentali
-        info = {}
-        try:
-            info = stock.info
-        except Exception:
-            pass
-
-        target_price = info.get("targetMeanPrice", price)
-        if target_price is None:
-            target_price = price
-
-        mcap = info.get("marketCap", 0)
-        mcap_val = (mcap / 1e6) if mcap else 0
-        
-        growth_upside = ((target_price - price) / price) * 100 if target_price > 0 else 0
-
-        # Calcolo RSI
-        delta = hist['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / (loss + 1e-9)
-        rsi_series = 100 - (100 / (1 + rs))
-        rsi = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
-        
-        # Medie Mobili
-        sma20 = float(hist['Close'].rolling(20).mean().iloc[-1])
-        sma50 = float(hist['Close'].rolling(50).mean().iloc[-1]) if len(hist) >= 50 else sma20
-        
-        # Score Momentum
-        mom_score = 50
-        if price > sma20: mom_score += 25
-        if price > sma50: mom_score += 25
-        
-        # Score Growth
-        growth_score = min(max(growth_upside * 2, 0), 100)
-        
-        # Score Salute
-        debt_to_equity = info.get("debtToEquity", 100)
-        if debt_to_equity is None: debt_to_equity = 100
-        health_score = 100 if debt_to_equity < 50 else (50 if debt_to_equity < 150 else 20)
-
-        # Total Score
-        total_score = round((growth_score * w_growth) + (mom_score * w_momentum) + (health_score * w_health), 1)
-
-        return {
-            "Ticker": ticker_symbol,
-            "Nome": info.get("shortName", ticker_symbol),
-            "Settore": info.get("sector", "N/D"),
-            "Prezzo ($)": round(price, 2),
-            "Target Analisti ($)": round(target_price, 2),
-            "Upside Stimato (%)": round(growth_upside, 1),
-            "Score Totale": total_score,
-            "RSI (14d)": round(rsi, 1),
-            "Debito/Equity": debt_to_equity,
-            "MCap (M$)": round(mcap_val, 1)
-        }
-    except Exception as e:
+# --- FUNZIONE D'ESTRAZIONE CON USER-AGENT ---
+def get_yahoo_data(symbol):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+    }
+    
+    # 1. Recupero Storico Prezzi (per RSI e Medie Mobili)
+    chart_url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=6m"
+    res_chart = requests.get(chart_url, headers=headers, timeout=10)
+    if res_chart.status_code != 200:
         return None
+        
+    data_chart = res_chart.json()
+    result = data_chart.get('chart', {}).get('result', [])
+    if not result:
+        return None
+        
+    timestamps = result[0].get('timestamp', [])
+    quote = result[0].get('indicators', {}).get('quote', [{}])[0]
+    closes = quote.get('close', [])
+    
+    # Rimuovi valori Noni
+    clean_closes = [c for c in closes if c is not None]
+    if len(clean_closes) < 20:
+        return None
+        
+    price = clean_closes[-1]
+    
+    # 2. Recupero Dati Fondamentali e Target
+    target_price = price
+    debt_to_equity = 100
+    mcap_val = 0
+    short_name = symbol
+    sector = "N/D"
+    
+    try:
+        quote_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
+        res_quote = requests.get(quote_url, headers=headers, timeout=10)
+        if res_quote.status_code == 200:
+            q_data = res_quote.json().get('quoteResponse', {}).get('result', [])
+            if q_data:
+                item = q_data[0]
+                target_price = item.get('targetPriceMean', price)
+                short_name = item.get('shortName', symbol)
+                mcap_val = item.get('marketCap', 0) / 1e6
+    except Exception:
+        pass
+
+    # Calcolo indicatori tecnici (RSI, Medie Mobili)
+    df_close = pd.Series(clean_closes)
+    delta = df_close.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / (loss + 1e-9)
+    rsi_series = 100 - (100 / (1 + rs))
+    rsi = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
+    
+    sma20 = float(df_close.rolling(20).mean().iloc[-1])
+    sma50 = float(df_close.rolling(50).mean().iloc[-1]) if len(df_close) >= 50 else sma20
+    
+    # Score Momentum
+    mom_score = 50
+    if price > sma20: mom_score += 25
+    if price > sma50: mom_score += 25
+    
+    # Upside & Growth Score
+    growth_upside = ((target_price - price) / price) * 100 if target_price > 0 else 0
+    growth_score = min(max(growth_upside * 2, 0), 100)
+    
+    # Score Salute
+    health_score = 50
+    
+    # Total Score
+    total_score = round((growth_score * w_growth) + (mom_score * w_momentum) + (health_score * w_health), 1)
+
+    return {
+        "Ticker": symbol,
+        "Nome": short_name,
+        "Settore": sector,
+        "Prezzo ($)": round(price, 2),
+        "Target Analisti ($)": round(target_price, 2),
+        "Upside Stimato (%)": round(growth_upside, 1),
+        "Score Totale": total_score,
+        "RSI (14d)": round(rsi, 1),
+        "MCap (M$)": round(mcap_val, 1)
+    }
 
 # --- ESECUZIONE ANALISI ---
 if st.button("🔄 Avvia Analisi e Genera Classifica"):
@@ -101,7 +117,7 @@ if st.button("🔄 Avvia Analisi e Genera Classifica"):
     
     for idx, t in enumerate(ticker_list):
         status_text.text(f"Analizzando {t}...")
-        data = analyze_stock(t)
+        data = get_yahoo_data(t)
         if data:
             results.append(data)
         progress_bar.progress((idx + 1) / len(ticker_list))
@@ -115,7 +131,7 @@ if st.button("🔄 Avvia Analisi e Genera Classifica"):
         
         st.subheader("🏆 Classifica Top Titoli")
         st.dataframe(
-            df[["Ticker", "Nome", "Settore", "Prezzo ($)", "Upside Stimato (%)", "Score Totale"]],
+            df[["Ticker", "Nome", "Prezzo ($)", "Target Analisti ($)", "Upside Stimato (%)", "Score Totale"]],
             use_container_width=True
         )
 
@@ -132,8 +148,7 @@ if st.button("🔄 Avvia Analisi e Genera Classifica"):
 
         st.markdown(f"### Dettaglio Analisi: **{stock_detail['Nome']}**")
         st.write(f"- **Target Analisti:** Prezzo attuale **${stock_detail['Prezzo ($)']}**, Target **${stock_detail['Target Analisti ($)']}** (Upside +{stock_detail['Upside Stimato (%)']}%).")
-        st.write(f"- **Momentum (RSI):** {stock_detail['RSI (14d)']}.")
-        st.write(f"- **Rapporto Debito/Capitale:** {stock_detail['Debito/Equity']}.")
+        st.write(f"- **Momentum (RSI):** Valore RSI a 14 giorni pari a **{stock_detail['RSI (14d)']}**.")
     else:
-        st.error("Nessun dato recuperato per i ticker inseriti. Riprova tra poco o verifica i simboli dei titoli.")
+        st.error("Errore di connessione o ticker errati. Assicurati che i simboli siano corretti (es. 'IONQ', 'SOUN', 'TECN.MI').")
         
