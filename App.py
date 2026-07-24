@@ -22,40 +22,60 @@ w_momentum = st.sidebar.slider("Peso Momentum Tecnico (%)", 0, 100, 40) / 100
 w_health = st.sidebar.slider("Peso Salute Finanziaria (%)", 0, 100, 20) / 100
 
 # --- FUNZIONE DI CALCOLO E ANALISI ---
-@st.cache_data(ttl=3600)
 def analyze_stock(ticker_symbol):
     try:
         stock = yf.Ticker(ticker_symbol)
-        info = stock.info
-        hist = stock.history(period="6m")
         
-        if hist.empty or 'currentPrice' not in info:
+        # Scarica lo storico dati (ultimi 6 mesi)
+        hist = stock.history(period="6m")
+        if hist.empty or len(hist) < 20:
             return None
 
-        price = info.get("currentPrice", hist['Close'].iloc[-1])
-        target_price = info.get("targetMeanPrice", price)
-        mcap = info.get("marketCap", 0) / 1e6
+        # Ottieni prezzo attuale dal grafico
+        price = float(hist['Close'].iloc[-1])
         
-        growth_upside = ((target_price - price) / price) * 100 if target_price else 0
+        # Tenta il recupero informazioni fondamentali
+        info = {}
+        try:
+            info = stock.info
+        except Exception:
+            pass
 
+        target_price = info.get("targetMeanPrice", price)
+        if target_price is None:
+            target_price = price
+
+        mcap = info.get("marketCap", 0)
+        mcap_val = (mcap / 1e6) if mcap else 0
+        
+        growth_upside = ((target_price - price) / price) * 100 if target_price > 0 else 0
+
+        # Calcolo RSI
         delta = hist['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs)).iloc[-1]
+        rs = gain / (loss + 1e-9)
+        rsi_series = 100 - (100 / (1 + rs))
+        rsi = float(rsi_series.iloc[-1]) if not rsi_series.empty else 50.0
         
-        sma20 = hist['Close'].rolling(20).mean().iloc[-1]
-        sma50 = hist['Close'].rolling(50).mean().iloc[-1]
+        # Medie Mobili
+        sma20 = float(hist['Close'].rolling(20).mean().iloc[-1])
+        sma50 = float(hist['Close'].rolling(50).mean().iloc[-1]) if len(hist) >= 50 else sma20
         
+        # Score Momentum
         mom_score = 50
         if price > sma20: mom_score += 25
         if price > sma50: mom_score += 25
         
+        # Score Growth
         growth_score = min(max(growth_upside * 2, 0), 100)
         
+        # Score Salute
         debt_to_equity = info.get("debtToEquity", 100)
+        if debt_to_equity is None: debt_to_equity = 100
         health_score = 100 if debt_to_equity < 50 else (50 if debt_to_equity < 150 else 20)
 
+        # Total Score
         total_score = round((growth_score * w_growth) + (mom_score * w_momentum) + (health_score * w_health), 1)
 
         return {
@@ -68,21 +88,25 @@ def analyze_stock(ticker_symbol):
             "Score Totale": total_score,
             "RSI (14d)": round(rsi, 1),
             "Debito/Equity": debt_to_equity,
-            "MCap (M$)": round(mcap, 1)
+            "MCap (M$)": round(mcap_val, 1)
         }
-    except Exception:
+    except Exception as e:
         return None
 
 # --- ESECUZIONE ANALISI ---
 if st.button("🔄 Avvia Analisi e Genera Classifica"):
     results = []
     progress_bar = st.progress(0)
+    status_text = st.empty()
     
     for idx, t in enumerate(ticker_list):
+        status_text.text(f"Analizzando {t}...")
         data = analyze_stock(t)
         if data:
             results.append(data)
         progress_bar.progress((idx + 1) / len(ticker_list))
+    
+    status_text.empty()
     
     if results:
         df = pd.DataFrame(results)
@@ -110,3 +134,6 @@ if st.button("🔄 Avvia Analisi e Genera Classifica"):
         st.write(f"- **Target Analisti:** Prezzo attuale **${stock_detail['Prezzo ($)']}**, Target **${stock_detail['Target Analisti ($)']}** (Upside +{stock_detail['Upside Stimato (%)']}%).")
         st.write(f"- **Momentum (RSI):** {stock_detail['RSI (14d)']}.")
         st.write(f"- **Rapporto Debito/Capitale:** {stock_detail['Debito/Equity']}.")
+    else:
+        st.error("Nessun dato recuperato per i ticker inseriti. Riprova tra poco o verifica i simboli dei titoli.")
+        
