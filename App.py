@@ -6,104 +6,119 @@ import requests
 st.set_page_config(page_title="Dynamic Small-Cap Screener", layout="wide")
 
 st.title("🛰️ Dynamic Market Small-Cap Screener")
-st.caption("Scansione automatica dell'intero universo Small-Cap reale tramite API di Mercato Ufficiali.")
-
-# --- CHIAVE API INTEGRATA ---
-FMP_API_KEY = "ICeBE4Wh9Y795Dft93PWjwE0lxfzx8Wp"
+st.caption("Scansione automatica e diretta del mercato Small-Cap senza limiti di API.")
 
 # --- SIDEBAR: PARAMETRI ---
 st.sidebar.header("⚙️ Parametri Screening")
 top_n = st.sidebar.slider("Numero di opportunità da trovare:", 5, 20, 15)
 min_price = st.sidebar.number_input("Prezzo Minimo ($):", value=2.0, step=0.5)
 max_price = st.sidebar.number_input("Prezzo Massimo ($):", value=50.0, step=5.0)
-min_market_cap = st.sidebar.number_input("Cap. di Mercato Minima ($M):", value=300, step=100) * 1000000
-max_market_cap = st.sidebar.number_input("Cap. di Mercato Massima ($M):", value=2000, step=500) * 1000000
 
-w_perf = st.sidebar.slider("Peso Momentum (%)", 0, 100, 50) / 100
-w_high = st.sidebar.slider("Peso Volume/Liquidità (%)", 0, 100, 50) / 100
+w_perf = st.sidebar.slider("Peso Spinta di Prezzo (%)", 0, 100, 60) / 100
+w_vol = st.sidebar.slider("Peso Volume/Attività (%)", 0, 100, 40) / 100
 
-# Optional: permette di sovrascrivere l'API key dalla sidebar se necessario
-user_api_key = st.sidebar.text_input("API Key (Opzionale):", value=FMP_API_KEY, type="password")
-active_api_key = user_api_key if user_api_key else FMP_API_KEY
-
-# --- FUNZIONE: SCANNER MERCATO VIA API ---
-@st.cache_data(ttl=1800)
-def fetch_screener_data(api_key, min_p, max_p, min_cap, max_cap):
-    """Esegue uno screening automatico di mercato direttamente sulle API FMP"""
-    url = f"https://financialmodelingprep.com/api/v3/stock-screener?marketCapMoreThan={min_cap}&marketCapLowerThan={max_cap}&priceMoreThan={min_p}&priceLowerThan={max_p}&isActivelyTrading=true&limit=200&apikey={api_key}"
+# --- FUNZIONE D'ESTRAZIONE DIRECT API ---
+@st.cache_data(ttl=900)
+def fetch_yahoo_smallcaps(min_p, max_p):
+    """Richiesta diretta allo screener JSON pubblico"""
+    url = "https://query2.finance.yahoo.com/v1/finance/screener"
     
-    try:
-        response = requests.get(url, timeout=12)
-        if response.status_code == 200:
-            data = response.json()
-            if isinstance(data, list) and len(data) > 0:
-                return pd.DataFrame(data)
-    except Exception as e:
-        st.error(f"Errore di connessione API: {e}")
-    return pd.DataFrame()
-
-# --- BOTTONE ED ESECUZIONE ---
-if st.button("🔍 Scansiona Mercato Reale Ora"):
-    with st.spinner("Connessione ai feed di mercato via API ed estrazione dati Small-Cap in corso..."):
-        df_raw = fetch_screener_data(active_api_key, min_price, max_price, min_market_cap, max_market_cap)
-        
-    if not df_raw.empty:
-        # Pulizia e conversione dati numerici
-        df_raw['changesPercentage'] = pd.to_numeric(df_raw['changesPercentage'], errors='coerce').fillna(0)
-        df_raw['price'] = pd.to_numeric(df_raw['price'], errors='coerce')
-        df_raw['volume'] = pd.to_numeric(df_raw['volume'], errors='coerce').fillna(0)
-        
-        # Algoritmo di Scoring basato su Variazione % e Attività/Volume
-        df_raw['Score Momentum'] = np.clip((df_raw['changesPercentage'] + 10) * 4, 0, 100)
-        df_raw['Score Liquidita'] = np.clip(np.log10(df_raw['volume'] + 1) * 15, 0, 100)
-        
-        df_raw['Score Potenziale'] = (df_raw['Score Momentum'] * w_perf) + (df_raw['Score Liquidita'] * w_high)
-        df_raw['Score Potenziale'] = df_raw['Score Potenziale'].round(1)
-        
-        # Ordina per il punteggio migliore
-        df_sorted = df_raw.sort_values(by="Score Potenziale", ascending=False).reset_index(drop=True)
-        top_df = df_sorted.head(top_n).copy()
-        top_df.index += 1
-        
-        # Rinomina colonne per una tabella chiara in italiano
-        rename_dict = {
-            'symbol': 'Ticker',
-            'companyName': 'Nome Azienda',
-            'price': 'Prezzo ($)',
-            'changesPercentage': 'Perf. Giornaliera (%)',
-            'marketCap': 'Cap. di Mercato ($)',
-            'sector': 'Settore',
-            'exchangeShortName': 'Borsa'
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    
+    # Payload per filtrare Small Cap US
+    payload = {
+        "offset": 0,
+        "size": 100,
+        "sortField": "percentchange",
+        "sortType": "DESC",
+        "quoteType": "EQUITY",
+        "query": {
+            "operator": "AND",
+            "operands": [
+                {"operator": "eq", "operands": ["region", "us"]},
+                {"operator": "gte", "operands": ["intradaymarketcap", 300000000]},
+                {"operator": "lte", "operands": ["intradaymarketcap", 2000000000]},
+                {"operator": "gte", "operands": ["intradayprice", min_p]},
+                {"operator": "lte", "operands": ["intradayprice", max_p]}
+            ]
         }
-        top_df = top_df.rename(columns=rename_dict)
-        
-        st.markdown("---")
-        st.subheader(f"🏆 Top {len(top_df)} Opportunità Small-Cap Trovate Live")
-        
-        # Tabella Principale
-        cols_to_show = ['Ticker', 'Nome Azienda', 'Prezzo ($)', 'Perf. Giornaliera (%)', 'Settore', 'Borsa', 'Score Potenziale']
-        st.dataframe(
-            top_df[[c for c in cols_to_show if c in top_df.columns]],
-            use_container_width=True
-        )
-        
-        st.markdown("---")
-        st.subheader("📊 Dettaglio Scheda Titolo")
-        selected = st.selectbox("Seleziona un'azienda trovata per analizzare la scheda:", top_df["Ticker"].tolist())
-        stock = top_df[top_df["Ticker"] == selected].iloc[0]
-        
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Score Potenziale", f"{stock['Score Potenziale']} / 100")
-        c2.metric("Prezzo Attuale", f"${stock['Prezzo ($)']}")
-        c3.metric("Spinta Recente", f"{stock['Perf. Giornaliera (%)']}%")
-        
-        st.write(f"**Analisi per {stock['Nome Azienda']} ({stock['Ticker']}):**")
-        st.write(f"- Settore di appartenenza: **{stock.get('Settore', 'N/A')}**")
-        st.write(f"- Quotata su: **{stock.get('Borsa', 'N/A')}**")
-        
-        mcap = stock.get('Cap. di Mercato ($)', 0)
-        if isinstance(mcap, (int, float)) and mcap > 0:
-            st.write(f"- Capitalizzazione di mercato: **${mcap:,.0f}**")
+    }
+
+    try:
+        res = requests.post(url, json=payload, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
+            return quotes
+    except Exception as e:
+        st.error(f"Errore nella chiamata di mercato: {e}")
+    return []
+
+# --- ESECUZIONE SCANNER ---
+if st.button("🔍 Scansiona Mercato Reale Ora"):
+    with st.spinner("Scansione in tempo reale dell'universo Small-Cap US in corso..."):
+        raw_quotes = fetch_yahoo_smallcaps(min_price, max_price)
+
+    if raw_quotes:
+        results = []
+        for q in raw_quotes:
+            sym = q.get("symbol")
+            name = q.get("shortName", sym)
+            price = q.get("regularMarketPrice", 0.0)
+            change = q.get("regularMarketChangePercent", 0.0)
+            mcap = q.get("marketCap", 0)
+            vol = q.get("regularMarketVolume", 0)
+
+            if price <= 0:
+                continue
+
+            # Calcolo Score di Momentum/Attività
+            score_change = min(max((change + 15) * 3, 0), 100)
+            score_vol = min(max(np.log10(vol + 1) * 15, 0), 100) if vol > 0 else 50
+            
+            total_score = round((score_change * w_perf) + (score_vol * w_vol), 1)
+
+            results.append({
+                "Ticker": sym,
+                "Nome Azienda": name,
+                "Prezzo ($)": round(price, 2),
+                "Perf. Oggi (%)": round(change, 2),
+                "Market Cap ($M)": round(mcap / 1_000_000, 1),
+                "Volume": f"{vol:,}",
+                "Score Potenziale": total_score
+            })
+
+        if results:
+            df = pd.DataFrame(results)
+            df = df.sort_values(by="Score Potenziale", ascending=False).reset_index(drop=True)
+            top_df = df.head(top_n).copy()
+            top_df.index += 1
+
+            st.markdown("---")
+            st.subheader(f"🏆 Top {len(top_df)} Small-Cap Trovate in Tempo Reale")
+
+            st.dataframe(
+                top_df[["Ticker", "Nome Azienda", "Prezzo ($)", "Perf. Oggi (%)", "Market Cap ($M)", "Score Potenziale"]],
+                use_container_width=True
+            )
+
+            st.markdown("---")
+            st.subheader("📊 Dettaglio Scheda Titolo")
+            selected = st.selectbox("Seleziona un'azienda per i dettagli:", top_df["Ticker"].tolist())
+            stock = top_df[top_df["Ticker"] == selected].iloc[0]
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Score Potenziale", f"{stock['Score Potenziale']} / 100")
+            c2.metric("Prezzo Attuale", f"${stock['Prezzo ($)']}")
+            c3.metric("Spinta Recente", f"{stock['Perf. Oggi (%)']}%")
+
+            st.write(f"**Analisi per {stock['Nome Azienda']} ({stock['Ticker']}):**")
+            st.write(f"- Capitalizzazione di Mercato: **${stock['Market Cap ($M)']} Milioni**")
+            st.write(f"- Volume di scambio: **{stock['Volume']}** azioni")
+        else:
+            st.warning("Nessun titolo trovato per la fascia di prezzo selezionata. Prova ad allargare i filtri nella barra laterale.")
     else:
-        st.warning("Nessun titolo trovato con i parametri attuali o quota API momentaneamente esaurita.")
-        
+        st.error("Nessun dato restituito dal mercato. Riprova tra qualche istante.")
+            
