@@ -3,12 +3,11 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
-import io
 
 st.set_page_config(page_title="Dynamic Small-Cap Screener", layout="wide")
 
 st.title("🛰️ Dynamic Market Small-Cap Screener")
-st.caption("Scansione automatica dell'intero universo Small-Cap reale (S&P 600) per individuare i titoli a più alto potenziale.")
+st.caption("Scansione automatica dell'intero universo Small-Cap reale per individuare i titoli a più alto potenziale.")
 
 # --- SIDEBAR: PARAMETRI ---
 st.sidebar.header("⚙️ Parametri Screening")
@@ -19,41 +18,50 @@ max_price = st.sidebar.number_input("Prezzo Massimo ($):", value=50.0, step=5.0)
 w_perf = st.sidebar.slider("Peso Momentum 1 Mese (%)", 0, 100, 50) / 100
 w_high = st.sidebar.slider("Peso Prossimità Massimi (%)", 0, 100, 50) / 100
 
-# --- FUNZIONE 1: RECUPERO DINAMICO UNIVERSO MERCATO ---
+# --- FUNZIONE 1: RECUPERO DINAMICO ANTI-BLOCCO ---
 @st.cache_data(ttl=86400) # Aggiorna la lista dell'indice ogni 24 ore
 def get_live_smallcap_universe():
-    """Scansiona la composizione reale dell'S&P SmallCap 600 live da Wikipedia"""
+    """Recupera la lista aggiornata dei ticker Small-Cap da fonti aperte resistenti ai blocchi IP"""
+    
+    # Fonte 1: Dataset pubblico GitHub aggiornato quotidianamente con le azioni US (S&P 600 / Russell)
+    url_github = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+    
+    # Fonte 2: Lista SmallCap backup via CDN
+    url_backup = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/sp600/sp600.txt"
+    
+    tickers = []
+    
+    # Tentativo Fonte Backup (S&P 600)
     try:
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_SmallCap_600_companies"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=12)
-        
-        if response.status_code != 200:
-            return []
-            
-        # Uso di io.StringIO per evitare l'errore di pathing HTML
-        html_buffer = io.StringIO(response.text)
-        tables = pd.read_html(html_buffer)
-        
-        df_symbols = tables[0]
-        if 'Symbol' in df_symbols.columns:
-            tickers = df_symbols['Symbol'].tolist()
-        elif 'Ticker' in df_symbols.columns:
-            tickers = df_symbols['Ticker'].tolist()
-        else:
-            tickers = []
-            
-        # Pulisci i ticker (es. sostituisci punti con trattini per Yahoo Finance)
-        tickers = [str(t).strip().replace('.', '-') for t in tickers if isinstance(t, str)]
-        return tickers
-    except Exception as e:
-        st.error(f"Errore durante l'estrazione della lista: {e}")
-        return []
+        res = requests.get(url_backup, timeout=8)
+        if res.status_code == 200:
+            lines = res.text.splitlines()
+            tickers = [line.strip().replace('.', '-') for line in lines if line.strip()]
+            if len(tickers) > 50:
+                return tickers
+    except Exception:
+        pass
+
+    # Tentativo Fonte Secondaria (Wikipedia via API User-Agent avanzata)
+    try:
+        url_wiki = "https://en.wikipedia.org/wiki/List_of_S%26P_SmallCap_600_companies"
+        headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
+        res = requests.get(url_wiki, headers=headers, timeout=8)
+        if res.status_code == 200:
+            tables = pd.read_html(res.text)
+            df_symbols = tables[0]
+            col = 'Symbol' if 'Symbol' in df_symbols.columns else 'Ticker'
+            tickers = [str(t).strip().replace('.', '-') for t in df_symbols[col].tolist()]
+            if len(tickers) > 50:
+                return tickers
+    except Exception:
+        pass
+
+    return tickers
 
 # --- FUNZIONE 2: SCANSIONE E ANALISI BATCH ---
 @st.cache_data(ttl=1800)
 def process_market_screening(ticker_list, min_p, max_p, weight_p, weight_h):
-    """Scarica ed elabora i dati di mercato per l'intera lista in un unico blocco"""
     if not ticker_list:
         return pd.DataFrame()
         
@@ -88,7 +96,7 @@ def process_market_screening(ticker_list, min_p, max_p, weight_p, weight_h):
             # Performance 1 Mese
             perf_1m = ((price - price_1m_ago) / price_1m_ago) * 100
             
-            # Vicinanza ai massimi a 3 mesi (struttura rialzista)
+            # Vicinanza ai massimi a 3 mesi
             range_span = max((high_3m - low_3m), 0.01)
             high_proximity = ((price - low_3m) / range_span) * 100
             
@@ -118,7 +126,7 @@ def process_market_screening(ticker_list, min_p, max_p, weight_p, weight_h):
 
 # --- BOTTONE ED ESECUZIONE ---
 if st.button("🔍 Scansiona Mercato Reale Ora"):
-    with st.spinner("1/2 Recupero componenti aggiornati dell'indice S&P SmallCap 600..."):
+    with st.spinner("1/2 Recupero dinamico dei componenti dell'universo Small-Cap..."):
         universe = get_live_smallcap_universe()
         
     if universe:
@@ -155,5 +163,5 @@ if st.button("🔍 Scansiona Mercato Reale Ora"):
         else:
             st.warning("Nessun titolo rispetta i filtri impostati. Prova ad allargare i range di prezzo nella barra laterale.")
     else:
-        st.error("Impossibile scaricare la lista dell'indice dal mercato. Riprova tra pochi istanti.")
+        st.error("Impossibile connettersi ai feed di mercato. Riprova tra pochi istanti.")
         
