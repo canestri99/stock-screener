@@ -3,11 +3,12 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
+import io
 
 st.set_page_config(page_title="Dynamic Small-Cap Screener", layout="wide")
 
 st.title("🛰️ Dynamic Market Small-Cap Screener")
-st.caption("Scansione automatica dell'intero universo Small-Cap reale per individuare i titoli a più alto potenziale.")
+st.caption("Scansione automatica dell'intero universo Small-Cap reale (S&P 600) per individuare i titoli a più alto potenziale.")
 
 # --- SIDEBAR: PARAMETRI ---
 st.sidebar.header("⚙️ Parametri Screening")
@@ -24,11 +25,16 @@ def get_live_smallcap_universe():
     """Scansiona la composizione reale dell'S&P SmallCap 600 live da Wikipedia"""
     try:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_SmallCap_600_companies"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        response = requests.get(url, headers=headers, timeout=10)
-        tables = pd.read_html(response.text)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
+        response = requests.get(url, headers=headers, timeout=12)
         
-        # Cerca la tabella dei ticker
+        if response.status_code != 200:
+            return []
+            
+        # Uso di io.StringIO per evitare l'errore di pathing HTML
+        html_buffer = io.StringIO(response.text)
+        tables = pd.read_html(html_buffer)
+        
         df_symbols = tables[0]
         if 'Symbol' in df_symbols.columns:
             tickers = df_symbols['Symbol'].tolist()
@@ -41,17 +47,17 @@ def get_live_smallcap_universe():
         tickers = [str(t).strip().replace('.', '-') for t in tickers if isinstance(t, str)]
         return tickers
     except Exception as e:
-        st.error(f"Errore nel recupero dinamico dell'indice: {e}")
+        st.error(f"Errore durante l'estrazione della lista: {e}")
         return []
 
 # --- FUNZIONE 2: SCANSIONE E ANALISI BATCH ---
 @st.cache_data(ttl=1800)
-def process_market_screening(ticker_list):
+def process_market_screening(ticker_list, min_p, max_p, weight_p, weight_h):
     """Scarica ed elabora i dati di mercato per l'intera lista in un unico blocco"""
     if not ticker_list:
         return pd.DataFrame()
         
-    # Scarica i dati di tutto il listino in batch unico (molto veloce)
+    # Scarica i dati di tutto il listino in un unico download batch rapido
     data = yf.download(ticker_list, period="3m", interval="1d", group_by='ticker', progress=False)
     
     results = []
@@ -71,8 +77,8 @@ def process_market_screening(ticker_list):
             closes = df_t['Close']
             price = float(closes.iloc[-1])
             
-            # Filtro per fascia di prezzo Small-Cap
-            if price < min_price or price > max_price:
+            # Filtro sulla fascia di prezzo impostata dall'utente
+            if price < min_p or price > max_p:
                 continue
                 
             price_1m_ago = float(closes.iloc[-20])
@@ -95,7 +101,7 @@ def process_market_screening(ticker_list):
             
             # Algoritmo di Scoring
             score_perf = min(max((perf_1m + 20) * 2, 0), 100)
-            total_score = round((score_perf * w_perf) + (high_proximity * w_high), 1)
+            total_score = round((score_perf * weight_p) + (high_proximity * weight_h), 1)
             
             results.append({
                 "Ticker": ticker,
@@ -111,15 +117,15 @@ def process_market_screening(ticker_list):
     return pd.DataFrame(results)
 
 # --- BOTTONE ED ESECUZIONE ---
-if st.button("🔍 Scansiona Mercato Reale ora"):
-    with st.spinner("1/2 Recupero componenti aggiornati dell'universo Small-Cap..."):
+if st.button("🔍 Scansiona Mercato Reale Ora"):
+    with st.spinner("1/2 Recupero componenti aggiornati dell'indice S&P SmallCap 600..."):
         universe = get_live_smallcap_universe()
         
     if universe:
-        st.success(f"Trovate {len(universe)} aziende Small-Cap attive sul mercato. Inizio analisi dei dati...")
+        st.success(f"Trovate {len(universe)} aziende Small-Cap attive sul mercato! Inizio analisi quantitativa...")
         
-        with st.spinner(f"2/2 Analisi quantitativa in corso su {len(universe)} titoli..."):
-            df_results = process_market_screening(universe)
+        with st.spinner(f"2/2 Analisi in corso su {len(universe)} titoli... (attendi circa 5-10 secondi)"):
+            df_results = process_market_screening(universe, min_price, max_price, w_perf, w_high)
             
         if not df_results.empty:
             df_sorted = df_results.sort_values(by="Score Potenziale", ascending=False).reset_index(drop=True)
@@ -127,7 +133,7 @@ if st.button("🔍 Scansiona Mercato Reale ora"):
             top_df.index += 1
             
             st.markdown("---")
-            st.subheader(f"🏆 Top {len(top_df)} Opportunità Small-Cap Trovate")
+            st.subheader(f"🏆 Top {len(top_df)} Opportunità Small-Cap Selezionate dall'Algoritmo")
             st.dataframe(
                 top_df[["Ticker", "Prezzo ($)", "Perf. 1 Mese (%)", "RSI (14d)", "Vicinanza ai Massimi (%)", "Score Potenziale"]],
                 use_container_width=True
@@ -147,7 +153,7 @@ if st.button("🔍 Scansiona Mercato Reale ora"):
             st.write(f"- Il titolo quota a **${stock['Prezzo ($)']}** ed è posizionato al **{stock['Vicinanza ai Massimi (%)']}%** del range di prezzo degli ultimi 3 mesi.")
             st.write(f"- Ha mostrato un momentum del **{stock['Perf. 1 Mese (%)']}%** nell'ultimo mese.")
         else:
-            st.warning("Nessun titolo rispetta i filtri impostati. Prova a modificare i parametri di prezzo nella barra laterale.")
+            st.warning("Nessun titolo rispetta i filtri impostati. Prova ad allargare i range di prezzo nella barra laterale.")
     else:
-        st.error("Impossibile scaricare la lista dell'indice dal mercato. Verifica la connessione o riprova tra poco.")
-            
+        st.error("Impossibile scaricare la lista dell'indice dal mercato. Riprova tra pochi istanti.")
+        
