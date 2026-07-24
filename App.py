@@ -7,14 +7,14 @@ import requests
 st.set_page_config(page_title="Small Cap Screener", layout="wide")
 
 st.title("🚀 Global Small-Cap Screener (3 Mesi)")
-st.caption("Analisi automatizzata multifattoriale tramite API integrata.")
+st.caption("Analisi automatizzata multifattoriale tramite Alpha Vantage API.")
 
 # --- CHIAVE API INTEGRATA ---
-API_KEY = "ICeBE4Wh9Y795Dft93PWjwE0lxfzx8Wp"
+API_KEY = "L7VMWM3OAU94RNBG"
 
 # --- BARRA LATERALE ---
 st.sidebar.header("⚙️ Parametri Algoritmo")
-TICKERS_DEFAULT = ["SOUN", "IONQ", "BLDP", "PLUG", "JOBY", "TECN", "NEXI"]
+TICKERS_DEFAULT = ["SOUN", "IONQ", "BLDP", "PLUG", "JOBY"]
 tickers_input = st.sidebar.text_area("Ticker da analizzare (separati da virgola):", ",".join(TICKERS_DEFAULT))
 ticker_list = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
@@ -22,30 +22,29 @@ w_growth = st.sidebar.slider("Peso Spinta di Prezzo (%)", 0, 100, 50) / 100
 w_momentum = st.sidebar.slider("Peso Momentum Tecnico (%)", 0, 100, 50) / 100
 
 # --- FUNZIONE D'ESTRAZIONE API ---
-def fetch_stock_api(symbol):
+def fetch_stock_alpha_vantage(symbol):
     try:
-        # Endpoint Financial Modeling Prep per prezzi storici
-        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}?timeseries=90&apikey={API_KEY}"
-        res = requests.get(url, timeout=10)
+        url = f"https://www.alphavantage.co/query?function=TIME_SERIES_DAILY&symbol={symbol}&apikey={API_KEY}"
+        res = requests.get(url, timeout=12)
         
         if res.status_code != 200:
             return None
             
         data = res.json()
-        historical = data.get("historical", [])
+        time_series = data.get("Time Series (Daily)", {})
         
-        if not historical or len(historical) < 20:
+        if not time_series:
             return None
             
-        # Invertiamo per avere l'ordine cronologico (dal meno recente al più recente)
-        historical.reverse()
-        closes = [item["close"] for item in historical if item.get("close") is not None]
+        # Estrai le date ordinate e i prezzi di chiusura
+        dates = sorted(time_series.keys())
+        closes = [float(time_series[d]["4. close"]) for d in dates]
         
         if len(closes) < 20:
             return None
 
         price = closes[-1]
-        price_1m_ago = closes[-20]
+        price_1m_ago = closes[-20] if len(closes) >= 20 else closes[0]
         
         # Performance a 1 Mese
         perf_1m = ((price - price_1m_ago) / price_1m_ago) * 100
@@ -89,8 +88,8 @@ if st.button("🔄 Avvia Analisi e Genera Classifica"):
     status_text = st.empty()
     
     for idx, t in enumerate(ticker_list):
-        status_text.text(f"Download dati API per {t}...")
-        data = fetch_stock_api(t)
+        status_text.text(f"Download dati Alpha Vantage per {t}...")
+        data = fetch_stock_alpha_vantage(t)
         if data:
             results.append(data)
         progress_bar.progress((idx + 1) / len(ticker_list))
@@ -124,5 +123,5 @@ if st.button("🔄 Avvia Analisi e Genera Classifica"):
         st.write(f"- **Forza Relativa (RSI):** Valore **{stock_detail['RSI (14d)']}**.")
         st.write(f"- **Posizione Tecnico/Medie:** Sopra la media a 20 giorni: **{stock_detail['Sopra SMA20']}**.")
     else:
-        st.error("Nessun dato recuperato. Verifica che la chiave API inserita sia attiva e priva di restrizioni.")
+        st.error("Nessun dato recuperato. Nota: le API gratuite di Alpha Vantage permettono fino a 5 chiamate al minuto. Attendi 30 secondi e riprova.")
         
