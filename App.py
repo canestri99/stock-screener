@@ -1,125 +1,153 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import yfinance as yf
 import requests
 
-st.set_page_config(page_title="Small-Cap Opportunity Screener", layout="wide")
+st.set_page_config(page_title="Dynamic Small-Cap Screener", layout="wide")
 
-st.title("🎯 Real Small-Cap Market Screener")
-st.caption("Scansione automatica del mercato per individuare i 10-20 titoli Small-Cap con maggior momentum a 3 mesi.")
+st.title("🛰️ Dynamic Market Small-Cap Screener")
+st.caption("Scansione automatica dell'intero universo Small-Cap reale per individuare i titoli a più alto potenziale.")
 
-# --- SIDEBAR: PARAMETRI DI FILTRO ---
-st.sidebar.header("🔍 Filtri di Mercato")
-min_mcap = st.sidebar.number_input("Capitalizzazione Minima ($M):", value=300, step=50) * 1_000_000
-max_mcap = st.sidebar.number_input("Capitalizzazione Massima ($M):", value=2000, step=100) * 1_000_000
-min_volume = st.sidebar.number_input("Volume Medio Minimo:", value=100000, step=50000)
+# --- SIDEBAR: PARAMETRI ---
+st.sidebar.header("⚙️ Parametri Screening")
+top_n = st.sidebar.slider("Numero di opportunità da trovare:", 5, 20, 15)
+min_price = st.sidebar.number_input("Prezzo Minimo ($):", value=2.0, step=0.5)
+max_price = st.sidebar.number_input("Prezzo Massimo ($):", value=50.0, step=5.0)
 
-top_n = st.sidebar.slider("Numero di titoli da mostrare nella classifica:", 5, 20, 15)
+w_perf = st.sidebar.slider("Peso Momentum 1 Mese (%)", 0, 100, 50) / 100
+w_high = st.sidebar.slider("Peso Prossimità Massimi (%)", 0, 100, 50) / 100
 
-# Lista di universo Small-Cap attiva (senza limite di chiamate singole)
-# Usiamo un approccio di scansione aggregata tramite endpoint pubblico per ovviare ai limiti di quota
-@st.cache_data(ttl=3600)
-def scan_small_cap_market():
+# --- FUNZIONE 1: RECUPERO DINAMICO UNIVERSO MERCATO ---
+@st.cache_data(ttl=86400) # Aggiorna la lista dell'indice ogni 24 ore
+def get_live_smallcap_universe():
+    """Scansiona la composizione reale dell'S&P SmallCap 600 live da Wikipedia"""
     try:
-        # Recupera la lista delle aziende e dati finanziari essenziali
-        url = "https://financialmodelingprep.com/api/v3/stock-screener?marketCapMoreThan=300000000&marketCapLowerThan=2000000000&betaMoreThan=1&isEtf=false&isActivelyTraded=true&limit=150&apikey=demo"
-        res = requests.get(url, timeout=15)
-        if res.status_code != 200:
-            return None
-        return res.json()
-    except Exception:
-        return None
-
-# Funzione per recuperare i dettagli di prezzo/momentum
-def get_bulk_prices(symbols):
-    try:
-        sym_str = ",".join(symbols)
-        url = f"https://financialmodelingprep.com/api/v3/quote/{sym_str}?apikey=demo"
-        res = requests.get(url, timeout=15)
-        if res.status_code == 200:
-            return res.json()
-        return []
-    except Exception:
-        return []
-
-# --- ESECUZIONE DELLA SCANSIONE ---
-if st.button("🚀 Scansiona il Mercato e Trova i Migliori Titoli"):
-    with st.spinner("Scansione del mercato Small-Cap in corso..."):
-        raw_candidates = scan_small_cap_market()
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_SmallCap_600_companies"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        response = requests.get(url, headers=headers, timeout=10)
+        tables = pd.read_html(response.text)
         
-        if not raw_candidates:
-            st.error("Errore durante la connessione al mercato. Riprova tra pochi istanti.")
+        # Cerca la tabella dei ticker
+        df_symbols = tables[0]
+        if 'Symbol' in df_symbols.columns:
+            tickers = df_symbols['Symbol'].tolist()
+        elif 'Ticker' in df_symbols.columns:
+            tickers = df_symbols['Ticker'].tolist()
         else:
-            # Filtra per parametri di Market Cap scelti dall'utente
-            valid_stocks = [
-                s for s in raw_candidates 
-                if min_mcap <= s.get('marketCap', 0) <= max_mcap and s.get('volume', 0) >= min_volume
-            ]
+            tickers = []
             
-            symbols = [s['symbol'] for s in valid_stocks[:60]] # Prendi i primi 60 candidati da analizzare
-            quotes = get_bulk_prices(symbols)
-            
-            quote_map = {q['symbol']: q for q in quotes}
-            
-            results = []
-            for item in valid_stocks:
-                sym = item['symbol']
-                q_data = quote_map.get(sym, {})
-                
-                price = q_data.get('price', item.get('price', 0))
-                change_pct = q_data.get('changesPercentage', 0)
-                year_high = q_data.get('yearHigh', price)
-                year_low = q_data.get('yearLow', price)
-                
-                if price <= 0:
+        # Pulisci i ticker (es. sostituisci punti con trattini per Yahoo Finance)
+        tickers = [str(t).strip().replace('.', '-') for t in tickers if isinstance(t, str)]
+        return tickers
+    except Exception as e:
+        st.error(f"Errore nel recupero dinamico dell'indice: {e}")
+        return []
+
+# --- FUNZIONE 2: SCANSIONE E ANALISI BATCH ---
+@st.cache_data(ttl=1800)
+def process_market_screening(ticker_list):
+    """Scarica ed elabora i dati di mercato per l'intera lista in un unico blocco"""
+    if not ticker_list:
+        return pd.DataFrame()
+        
+    # Scarica i dati di tutto il listino in batch unico (molto veloce)
+    data = yf.download(ticker_list, period="3m", interval="1d", group_by='ticker', progress=False)
+    
+    results = []
+    
+    for ticker in ticker_list:
+        try:
+            if len(ticker_list) > 1:
+                if ticker not in data.columns.levels[0]:
                     continue
-                    
-                # Prossimità ai massimi annuali (segnale di breakout/momentum)
-                range_span = max((year_high - year_low), 0.01)
-                high_proximity = ((price - year_low) / range_span) * 100
-                
-                # Calcolo dello Score di Potenziale
-                # Più il titolo è vicino ai massimi ed ha spinta di breve, più alto è lo score
-                score = round((high_proximity * 0.6) + (min(max(change_pct + 10, 0), 40) * 1.0), 1)
-                
-                results.append({
-                    "Ticker": sym,
-                    "Nome Società": item.get('companyName', sym),
-                    "Settore": item.get('sector', 'N/A'),
-                    "Prezzo ($)": round(price, 2),
-                    "Market Cap ($M)": round(item.get('marketCap', 0) / 1_000_000, 1),
-                    "Variazione Oggi (%)": round(change_pct, 2),
-                    "Vicinanza ai Massimi (%)": round(high_proximity, 1),
-                    "Score Potenziale (0-100)": score
-                })
-            
-            if results:
-                df = pd.DataFrame(results)
-                df = df.sort_values(by="Score Potenziale (0-100)", ascending=False).reset_index(drop=True)
-                
-                top_df = df.head(top_n)
-                top_df.index += 1
-                
-                st.subheader(f"🏆 Top {len(top_df)} Small-Cap Selezionate dall'Algoritmo")
-                st.dataframe(
-                    top_df[["Ticker", "Nome Società", "Settore", "Prezzo ($)", "Market Cap ($M)", "Variazione Oggi (%)", "Score Potenziale (0-100)"]],
-                    use_container_width=True
-                )
-                
-                st.markdown("---")
-                st.subheader("📊 Dettaglio Opportunità")
-                selected_ticker = st.selectbox("Seleziona una Small-Cap dalla lista per l'analisi dettagliata:", top_df["Ticker"].tolist())
-                
-                detail = top_df[top_df["Ticker"] == selected_ticker].iloc[0]
-                
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Score Potenziale", f"{detail['Score Potenziale (0-100)']} / 100")
-                col2.metric("Market Cap", f"${detail['Market Cap ($M)']}M")
-                col3.metric("Settore", detail['Settore'])
-                
-                st.write(f"**Perché questo titolo è in classifica:**")
-                st.write(f"- Si trova al **{detail['Vicinanza ai Massimi (%)']}%** del suo range annuale (forte struttura rialzista).")
-                st.write(f"- Performance recente: **{detail['Variazione Oggi (%)']}%**.")
+                df_t = data[ticker].dropna()
             else:
-                st.warning("Nessuna azione trovata con i filtri impostati. Prova ad allargare i parametri nella barra laterale.")
+                df_t = data.dropna()
                 
+            if len(df_t) < 20:
+                continue
+                
+            closes = df_t['Close']
+            price = float(closes.iloc[-1])
+            
+            # Filtro per fascia di prezzo Small-Cap
+            if price < min_price or price > max_price:
+                continue
+                
+            price_1m_ago = float(closes.iloc[-20])
+            high_3m = float(closes.max())
+            low_3m = float(closes.min())
+            
+            # Performance 1 Mese
+            perf_1m = ((price - price_1m_ago) / price_1m_ago) * 100
+            
+            # Vicinanza ai massimi a 3 mesi (struttura rialzista)
+            range_span = max((high_3m - low_3m), 0.01)
+            high_proximity = ((price - low_3m) / range_span) * 100
+            
+            # RSI (14 giorni)
+            delta = closes.diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / (loss + 1e-9)
+            rsi = float((100 - (100 / (1 + rs))).iloc[-1])
+            
+            # Algoritmo di Scoring
+            score_perf = min(max((perf_1m + 20) * 2, 0), 100)
+            total_score = round((score_perf * w_perf) + (high_proximity * w_high), 1)
+            
+            results.append({
+                "Ticker": ticker,
+                "Prezzo ($)": round(price, 2),
+                "Perf. 1 Mese (%)": round(perf_1m, 1),
+                "RSI (14d)": round(rsi, 1),
+                "Vicinanza ai Massimi (%)": round(high_proximity, 1),
+                "Score Potenziale": total_score
+            })
+        except Exception:
+            continue
+            
+    return pd.DataFrame(results)
+
+# --- BOTTONE ED ESECUZIONE ---
+if st.button("🔍 Scansiona Mercato Reale ora"):
+    with st.spinner("1/2 Recupero componenti aggiornati dell'universo Small-Cap..."):
+        universe = get_live_smallcap_universe()
+        
+    if universe:
+        st.success(f"Trovate {len(universe)} aziende Small-Cap attive sul mercato. Inizio analisi dei dati...")
+        
+        with st.spinner(f"2/2 Analisi quantitativa in corso su {len(universe)} titoli..."):
+            df_results = process_market_screening(universe)
+            
+        if not df_results.empty:
+            df_sorted = df_results.sort_values(by="Score Potenziale", ascending=False).reset_index(drop=True)
+            top_df = df_sorted.head(top_n)
+            top_df.index += 1
+            
+            st.markdown("---")
+            st.subheader(f"🏆 Top {len(top_df)} Opportunità Small-Cap Trovate")
+            st.dataframe(
+                top_df[["Ticker", "Prezzo ($)", "Perf. 1 Mese (%)", "RSI (14d)", "Vicinanza ai Massimi (%)", "Score Potenziale"]],
+                use_container_width=True
+            )
+            
+            st.markdown("---")
+            st.subheader("📊 Dettaglio Scheda Titolo")
+            selected = st.selectbox("Seleziona una delle aziende trovate per analizzarla:", top_df["Ticker"].tolist())
+            stock = top_df[top_df["Ticker"] == selected].iloc[0]
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Score Potenziale", f"{stock['Score Potenziale']} / 100")
+            c2.metric("Spinta a 1 Mese", f"{stock['Perf. 1 Mese (%)']}%")
+            c3.metric("RSI Tecnico", f"{stock['RSI (14d)']}")
+            
+            st.write(f"**Analisi per {stock['Ticker']}:**")
+            st.write(f"- Il titolo quota a **${stock['Prezzo ($)']}** ed è posizionato al **{stock['Vicinanza ai Massimi (%)']}%** del range di prezzo degli ultimi 3 mesi.")
+            st.write(f"- Ha mostrato un momentum del **{stock['Perf. 1 Mese (%)']}%** nell'ultimo mese.")
+        else:
+            st.warning("Nessun titolo rispetta i filtri impostati. Prova a modificare i parametri di prezzo nella barra laterale.")
+    else:
+        st.error("Impossibile scaricare la lista dell'indice dal mercato. Verifica la connessione o riprova tra poco.")
+            
